@@ -126,7 +126,7 @@ function normalizeNomination(room) {
   nomination.skippedOwnerIds = sanitizeIdList(nomination.skippedOwnerIds, nomination.turnOrderOwnerIds);
   nomination.currentTurnOwnerId = nomination.currentTurnOwnerId && nomination.turnOrderOwnerIds.includes(nomination.currentTurnOwnerId)
     ? nomination.currentTurnOwnerId
-    : nomination.turnOrderOwnerIds.find((ownerId) => !nomination.skippedOwnerIds.includes(ownerId)) || null;
+    : nextOwnerInTurnOrder(room, nomination, null);
   nomination.openedAt = nomination.openedAt || null;
   nomination.closedAt = nomination.closedAt || null;
 }
@@ -391,17 +391,32 @@ function formatLakh(amountLakh) {
 }
 
 function validNominationOwners(room, nomination) {
+  const requiredBidLakh = nomination.currentBidLakh === null
+    ? nomination.startingBidLakh
+    : nomination.currentBidLakh + nomination.bidStepLakh;
   return nomination.turnOrderOwnerIds.filter((ownerId) => {
     const owner = getOwner(room, ownerId);
     return Boolean(owner) && owner.rosterCount < room.settings.maxPlayers && !nomination.skippedOwnerIds.includes(ownerId);
+  }).filter((ownerId) => {
+    const owner = getOwner(room, ownerId);
+    return Boolean(owner) && owner.purseRemainingLakh >= requiredBidLakh;
   });
 }
 
-function nextOwnerInTurnOrder(activeOwnerIds, fromOwnerId) {
-  if (!activeOwnerIds.length) return null;
-  const index = activeOwnerIds.indexOf(fromOwnerId);
-  if (index === -1) return activeOwnerIds[0];
-  return activeOwnerIds[(index + 1) % activeOwnerIds.length];
+function nextOwnerInTurnOrder(room, nomination, fromOwnerId) {
+  const order = nomination.turnOrderOwnerIds || [];
+  if (!order.length) return null;
+  const startIndex = order.indexOf(fromOwnerId);
+  for (let offset = 1; offset <= order.length; offset += 1) {
+    const ownerId = order[(startIndex + offset + order.length) % order.length];
+    const owner = getOwner(room, ownerId);
+    if (!owner) continue;
+    if (owner.rosterCount >= room.settings.maxPlayers) continue;
+    if (nomination.skippedOwnerIds.includes(ownerId)) continue;
+    if (owner.purseRemainingLakh < (nomination.currentBidLakh === null ? nomination.startingBidLakh : nomination.currentBidLakh + nomination.bidStepLakh)) continue;
+    return ownerId;
+  }
+  return null;
 }
 
 function createNomination(room, player) {
@@ -520,7 +535,7 @@ function finalizeNomination(room, actorName) {
   }
 
   if (!nomination.currentTurnOwnerId || !activeOwnerIds.includes(nomination.currentTurnOwnerId)) {
-    nomination.currentTurnOwnerId = nextOwnerInTurnOrder(activeOwnerIds, nomination.currentTurnOwnerId || leaderId);
+    nomination.currentTurnOwnerId = nextOwnerInTurnOrder(room, nomination, nomination.currentTurnOwnerId || leaderId);
   }
 }
 
@@ -666,7 +681,7 @@ const server = http.createServer(async (req, res) => {
             playerId: player.id,
             ownerId: owner.id,
           });
-          nomination.currentTurnOwnerId = nextOwnerInTurnOrder(validNominationOwners(draft, nomination), owner.id);
+          nomination.currentTurnOwnerId = nextOwnerInTurnOrder(draft, nomination, owner.id);
           finalizeNomination(draft, actor.name);
         });
         return send(res, 200, { ok: true });
@@ -693,7 +708,7 @@ const server = http.createServer(async (req, res) => {
           assert(owner.rosterCount < draft.settings.maxPlayers, `${owner.name} already has ${draft.settings.maxPlayers} players.`);
           nomination.currentBidLakh = amountLakh;
           nomination.currentLeaderOwnerId = owner.id;
-          nomination.currentTurnOwnerId = nextOwnerInTurnOrder(validNominationOwners(draft, nomination), owner.id);
+          nomination.currentTurnOwnerId = nextOwnerInTurnOrder(draft, nomination, owner.id);
           nomination.openedAt = nomination.openedAt || new Date().toISOString();
           writeEvent(draft, "bid", actor.name, `${owner.name} bids ${formatLakh(amountLakh)} for ${player.name}.`, {
             playerId: player.id,
