@@ -15,13 +15,14 @@ const state = {
     filter: "available",
     selectedPlayerId: null,
     joinRole: "spectator",
+    error: null,
   },
 };
 
 let eventSource = null;
 
 render();
-if (route.roomId) loadRoom();
+if (route.roomId) loadRoom().catch((error) => presentError(error.message || "Failed to load room."));
 
 function parseRoute() {
   const parts = location.pathname.split("/").filter(Boolean);
@@ -51,6 +52,27 @@ async function fetchJson(url, options) {
   const payload = await response.json();
   if (!response.ok) throw new Error(payload.error || "Request failed.");
   return payload;
+}
+
+function presentError(message) {
+  state.ui.error = {
+    title: "Action blocked",
+    message,
+  };
+  render();
+}
+
+function dismissError() {
+  state.ui.error = null;
+  render();
+}
+
+async function withErrorPopup(task) {
+  try {
+    await task();
+  } catch (error) {
+    presentError(error.message || "Request failed.");
+  }
 }
 
 async function loadRoom() {
@@ -204,6 +226,22 @@ function shell(body) {
         ${state.room ? headerMeta() : ""}
       </header>
       ${body}
+      ${state.ui.error ? errorOverlay(state.ui.error) : ""}
+    </div>
+  `;
+}
+
+function errorOverlay(error) {
+  return `
+    <div class="error-overlay" role="alertdialog" aria-modal="true" aria-labelledby="errorTitle">
+      <div class="error-sheet">
+        <div class="error-kicker">Warning</div>
+        <h2 id="errorTitle">${escapeHtml(error.title)}</h2>
+        <p>${escapeHtml(error.message)}</p>
+        <div class="error-actions">
+          <button type="button" id="errorDismissBtn">Dismiss</button>
+        </div>
+      </div>
     </div>
   `;
 }
@@ -281,7 +319,7 @@ function commandCenterView() {
           </div>
           <div>
             <span>Live bid</span>
-            <strong>${nomination?.currentBidLakh ? formatAmount(nomination.currentBidLakh) : nomination ? formatAmount(nomination.startingBidLakh) : "—"}</strong>
+            <strong>${nomination?.currentBidLakh ? formatAmount(nomination.currentBidLakh) : nomination ? "No bid yet" : "—"}</strong>
           </div>
           <div>
             <span>Leader</span>
@@ -515,9 +553,6 @@ function ownerBidPanel(nomination) {
 
   if (member?.role === "owner") {
     const owner = state.room.owners.find((entry) => entry.id === member.ownerId);
-    const minBidLakh = nomination.currentBidLakh === null
-      ? nomination.startingBidLakh
-      : nomination.currentBidLakh + nomination.bidStepLakh;
     const isCurrentTurn = nomination.currentTurnOwnerId === member.ownerId;
     return `
       <section class="bid-panel">
@@ -530,7 +565,7 @@ function ownerBidPanel(nomination) {
         ${isCurrentTurn
           ? `
             <form id="ownerBidForm" class="inline-toolbar">
-              <input id="ownerBidAmount" type="number" step="0.05" min="0" placeholder="Minimum ${formatAmount(minBidLakh)}" />
+              <input id="ownerBidAmount" type="number" step="0.01" min="0.01" placeholder="${nomination.currentBidLakh === null ? "Any positive amount" : `Above ${formatAmount(nomination.currentBidLakh)}`}" />
               <button type="submit">Place bid</button>
               <button type="button" id="ownerSkipBtn" class="ghost">Skip turn</button>
             </form>
@@ -594,13 +629,15 @@ function labelStatus(status) {
 function bindLandingEvents() {
   document.getElementById("createRoomForm")?.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const adminName = document.getElementById("adminName").value.trim() || "Admin";
-    const payload = await fetchJson("/api/rooms", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ adminName }),
+    await withErrorPopup(async () => {
+      const adminName = document.getElementById("adminName").value.trim() || "Admin";
+      const payload = await fetchJson("/api/rooms", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ adminName }),
+      });
+      location.href = `/room/${payload.room.roomId}?admin=${payload.adminKey}`;
     });
-    location.href = `/room/${payload.room.roomId}?admin=${payload.adminKey}`;
   });
 
   const roomInput = document.getElementById("roomIdInput");
@@ -616,6 +653,8 @@ function bindLandingEvents() {
 }
 
 function bindRoomEvents() {
+  document.getElementById("errorDismissBtn")?.addEventListener("click", dismissError);
+
   document.getElementById("playerSearch")?.addEventListener("input", (event) => {
     state.ui.search = event.target.value;
     render();
@@ -637,49 +676,59 @@ function bindRoomEvents() {
 
   document.getElementById("joinRoomForm")?.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const role = document.getElementById("joinRole").value;
-    const payload = await fetchJson(`/api/rooms/${state.route.roomId}/join`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        code: document.getElementById("joinCode").value.trim().toUpperCase(),
-        role,
-        ownerId: document.getElementById("joinOwnerId").value,
-        displayName: document.getElementById("joinDisplayName").value.trim() || "Guest",
-        memberToken: state.auth.member?.memberToken || "",
-      }),
+    await withErrorPopup(async () => {
+      const role = document.getElementById("joinRole").value;
+      const payload = await fetchJson(`/api/rooms/${state.route.roomId}/join`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          code: document.getElementById("joinCode").value.trim().toUpperCase(),
+          role,
+          ownerId: document.getElementById("joinOwnerId").value,
+          displayName: document.getElementById("joinDisplayName").value.trim() || "Guest",
+          memberToken: state.auth.member?.memberToken || "",
+        }),
+      });
+      state.auth.member = payload.member;
+      storeMember(state.route.roomId, payload.member);
+      await loadRoom();
     });
-    state.auth.member = payload.member;
-    storeMember(state.route.roomId, payload.member);
-    await loadRoom();
   });
 
   document.getElementById("addOwnerForm")?.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const name = document.getElementById("ownerNameInput").value.trim();
-    if (!name) return;
-    await action("add-owner", { name });
+    await withErrorPopup(async () => {
+      const name = document.getElementById("ownerNameInput").value.trim();
+      if (!name) return;
+      await action("add-owner", { name });
+    });
   });
 
   document.querySelectorAll("[data-action]").forEach((button) => {
     button.addEventListener("click", async () => {
-      const type = button.dataset.action;
-      if (type === "start") await action("start-auction");
-      if (type === "unsold") await action("mark-unsold");
-      if (type === "undo") await action("undo-last-action");
-      if (type === "pause") await action(state.room.status === "paused" ? "resume-auction" : "pause-auction");
-      if (type === "complete") await action("complete-room");
+      await withErrorPopup(async () => {
+        const type = button.dataset.action;
+        if (type === "start") await action("start-auction");
+        if (type === "unsold") await action("mark-unsold");
+        if (type === "undo") await action("undo-last-action");
+        if (type === "pause") await action(state.room.status === "paused" ? "resume-auction" : "pause-auction");
+        if (type === "complete") await action("complete-room");
+      });
     });
   });
 
   document.getElementById("ownerBidForm")?.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const bidCr = Number(document.getElementById("ownerBidAmount").value);
-    await action("place-bid", { amountLakh: Math.round(bidCr * 100) });
+    await withErrorPopup(async () => {
+      const bidCr = Number(document.getElementById("ownerBidAmount").value);
+      await action("place-bid", { amountLakh: Math.round(bidCr * 100) });
+    });
   });
 
   document.getElementById("ownerSkipBtn")?.addEventListener("click", async () => {
-    await action("skip-turn");
+    await withErrorPopup(async () => {
+      await action("skip-turn");
+    });
   });
 }
 

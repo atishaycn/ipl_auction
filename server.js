@@ -85,7 +85,7 @@ function recomputeOwners(room) {
 
 function buildTurnOrder(room, startingBidLakh) {
   return room.owners
-    .filter((owner) => owner.rosterCount < room.settings.maxPlayers && owner.purseRemainingLakh >= startingBidLakh)
+    .filter((owner) => owner.rosterCount < room.settings.maxPlayers && owner.purseRemainingLakh > 0)
     .map((owner) => owner.id);
 }
 
@@ -115,7 +115,6 @@ function normalizeNomination(room) {
   nomination.startingBidLakh = Number.isFinite(nomination.startingBidLakh) ? nomination.startingBidLakh : player.baseCostLakh;
   nomination.currentBidLakh = Number.isFinite(nomination.currentBidLakh) ? nomination.currentBidLakh : null;
   nomination.currentLeaderOwnerId = nomination.currentLeaderOwnerId || null;
-  nomination.bidStepLakh = Number.isFinite(nomination.bidStepLakh) ? nomination.bidStepLakh : room.settings.minBidStepLakh || 5;
   nomination.turnOrderOwnerIds = sanitizeIdList(
     nomination.turnOrderOwnerIds,
     room.owners.map((owner) => owner.id),
@@ -392,8 +391,8 @@ function formatLakh(amountLakh) {
 
 function validNominationOwners(room, nomination) {
   const requiredBidLakh = nomination.currentBidLakh === null
-    ? nomination.startingBidLakh
-    : nomination.currentBidLakh + nomination.bidStepLakh;
+    ? 1
+    : nomination.currentBidLakh + 1;
   return nomination.turnOrderOwnerIds.filter((ownerId) => {
     const owner = getOwner(room, ownerId);
     return Boolean(owner) && owner.rosterCount < room.settings.maxPlayers && !nomination.skippedOwnerIds.includes(ownerId);
@@ -413,7 +412,7 @@ function nextOwnerInTurnOrder(room, nomination, fromOwnerId) {
     if (!owner) continue;
     if (owner.rosterCount >= room.settings.maxPlayers) continue;
     if (nomination.skippedOwnerIds.includes(ownerId)) continue;
-    if (owner.purseRemainingLakh < (nomination.currentBidLakh === null ? nomination.startingBidLakh : nomination.currentBidLakh + nomination.bidStepLakh)) continue;
+    if (owner.purseRemainingLakh < (nomination.currentBidLakh === null ? 1 : nomination.currentBidLakh + 1)) continue;
     return ownerId;
   }
   return null;
@@ -428,7 +427,6 @@ function createNomination(room, player) {
     startingBidLakh,
     currentBidLakh: null,
     currentLeaderOwnerId: null,
-    bidStepLakh: room.settings.minBidStepLakh || 5,
     turnOrderOwnerIds,
     skippedOwnerIds: [],
     currentTurnOwnerId: turnOrderOwnerIds[0] || null,
@@ -700,9 +698,7 @@ const server = http.createServer(async (req, res) => {
           assert(nomination.currentTurnOwnerId === owner.id, "It is not this owner's turn.");
           const amountLakh = Math.round(Number(body.amountLakh));
           assert(Number.isFinite(amountLakh) && amountLakh > 0, "Invalid bid amount.");
-          const minimum = nomination.currentBidLakh === null
-            ? nomination.startingBidLakh
-            : nomination.currentBidLakh + nomination.bidStepLakh;
+          const minimum = nomination.currentBidLakh === null ? 1 : nomination.currentBidLakh + 1;
           assert(amountLakh >= minimum, `Bid must be at least ${formatLakh(minimum)}.`);
           assert(owner.purseRemainingLakh >= amountLakh, `${owner.name} does not have enough purse.`);
           assert(owner.rosterCount < draft.settings.maxPlayers, `${owner.name} already has ${draft.settings.maxPlayers} players.`);
