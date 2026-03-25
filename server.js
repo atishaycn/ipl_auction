@@ -110,7 +110,8 @@ function normalizeNomination(room) {
     return;
   }
 
-  nomination.status = nomination.status || "open";
+  const rawStatus = nomination.status || "open";
+  nomination.status = rawStatus === "nominated" || rawStatus === "last-call" ? "open" : rawStatus;
   nomination.startingBidLakh = Number.isFinite(nomination.startingBidLakh) ? nomination.startingBidLakh : player.baseCostLakh;
   nomination.currentBidLakh = Number.isFinite(nomination.currentBidLakh) ? nomination.currentBidLakh : null;
   nomination.currentLeaderOwnerId = nomination.currentLeaderOwnerId || null;

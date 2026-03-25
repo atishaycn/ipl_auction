@@ -142,6 +142,14 @@ function currentNominationPlayer() {
   return state.room.players.find((player) => player.id === state.room.currentNomination.playerId) || null;
 }
 
+function turnOwnerText(nomination) {
+  const owner = nomination?.currentTurnOwnerId
+    ? state.room.owners.find((entry) => entry.id === nomination.currentTurnOwnerId)
+    : null;
+  if (!owner) return "Waiting for the next turn.";
+  return `${escapeHtml(owner.name)} is on turn now.`;
+}
+
 function ownerRoster(ownerId) {
   return state.room.players.filter((player) => player.soldTo?.ownerId === ownerId);
 }
@@ -217,7 +225,7 @@ function landingView() {
         <div class="landing-copy">
           <div class="kicker">Fantasy IPL Auction</div>
           <h1>Run the room like an auction floor, not a spreadsheet.</h1>
-          <p>Create a live room, nominate players, accept bids from owners on their own devices, and keep a public board running the entire night.</p>
+          <p>Create a live room, share the code, and run turn-based bidding from a queue of IPL players while the public board updates in real time.</p>
           <form id="createRoomForm" class="landing-actions">
             <input id="adminName" placeholder="Host name" value="Admin" />
             <button type="submit">Create Auction Room</button>
@@ -263,8 +271,8 @@ function commandCenterView() {
       <section class="auction-stage">
         <div class="stage-copy">
           <div class="stage-kicker">On The Block</div>
-          <h1>${stagePlayer ? escapeHtml(stagePlayer.name) : "Nominate the next player"}</h1>
-          <p>${stagePlayer ? `${escapeHtml(stagePlayer.team)} · ${stagePlayer.category} pool · ${stagePlayer.overseas ? "Overseas" : "Domestic"}` : "Select an available player from the pool and open bidding."}</p>
+          <h1>${stagePlayer ? escapeHtml(stagePlayer.name) : "Waiting for the next player"}</h1>
+          <p>${stagePlayer ? `${escapeHtml(stagePlayer.team)} · ${stagePlayer.category} pool · ${stagePlayer.overseas ? "Overseas" : "Domestic"}` : "Start the auction and the room will auto-advance through the queue."}</p>
         </div>
         <div class="stage-metrics">
           <div>
@@ -303,7 +311,7 @@ function commandCenterView() {
         </div>
         <div class="owner-list">
           ${sortedOwners().map((owner) => `
-            <article class="owner-row ${nomination?.currentLeaderOwnerId === owner.id ? "is-leading" : ""}">
+            <article class="owner-row ${nomination?.currentLeaderOwnerId === owner.id ? "is-leading" : ""} ${nomination?.currentTurnOwnerId === owner.id ? "is-turn" : ""}">
               <div>
                 <strong>${escapeHtml(owner.name)}</strong>
                 <span>${owner.claimed ? `Claimed by ${escapeHtml(owner.claimedName || owner.name)}` : "Unclaimed"}</span>
@@ -329,7 +337,7 @@ function commandCenterView() {
           <div class="panel-head">
             <div>
               <h2>Available Pool</h2>
-              <p>Search the full player database and nominate the next lot directly from here.</p>
+              <p>Search the full player database and review the fixed auction queue directly from here.</p>
             </div>
             <div class="panel-tools">
               <input id="playerSearch" placeholder="Search player or team" value="${escapeHtml(state.ui.search)}" />
@@ -418,6 +426,7 @@ function publicRoomView() {
   const nomination = state.room.currentNomination;
   const stagePlayer = currentNominationPlayer();
   const leader = nomination?.currentLeaderOwnerId ? state.room.owners.find((owner) => owner.id === nomination.currentLeaderOwnerId) : null;
+  const turnOwner = nomination?.currentTurnOwnerId ? state.room.owners.find((owner) => owner.id === nomination.currentTurnOwnerId) : null;
   return `
     <main class="public-board">
       <section class="public-stage">
@@ -430,6 +439,7 @@ function publicRoomView() {
           <div><span>Status</span><strong>${nomination ? labelStatus(nomination.status) : labelStatus(state.room.status)}</strong></div>
           <div><span>Current bid</span><strong>${nomination?.currentBidLakh ? formatAmount(nomination.currentBidLakh) : "No bid yet"}</strong></div>
           <div><span>Leader</span><strong>${leader ? escapeHtml(leader.name) : "—"}</strong></div>
+          <div><span>Turn</span><strong>${turnOwner ? escapeHtml(turnOwner.name) : "—"}</strong></div>
           <div><span>Sold lots</span><strong>${state.room.players.filter((player) => player.status === "sold").length}</strong></div>
         </div>
         ${auctionRulesPanel()}
@@ -462,18 +472,15 @@ function publicRoomView() {
 
 function adminStageControls(stagePlayer, nomination) {
   if (!state.auth.isAdmin) return "";
-  const canNominate = !nomination && selectedPlayer() && selectedPlayer().status === "available";
+  const canStart = !nomination && state.room.status === "setup";
   return `
     <section class="control-strip">
       <div class="control-group">
         <h2>Admin Controls</h2>
-        <p>Nominate, open, close, pause, or rewind the room from the live stage.</p>
+        <p>Start the room, pause it, undo mistakes, or manually mark a lot unsold if needed.</p>
       </div>
       <div class="action-row">
-        <button type="button" data-action="nominate" ${canNominate ? "" : "disabled"}>${stagePlayer && stagePlayer.status === "available" ? `Nominate ${escapeHtml(stagePlayer.name)}` : "Select an available player"}</button>
-        <button type="button" data-action="open" ${nomination?.status === "nominated" ? "" : "disabled"}>Open bidding</button>
-        <button type="button" data-action="last-call" ${nomination?.status === "open" ? "" : "disabled"}>Last call</button>
-        <button type="button" data-action="close" ${nomination?.currentLeaderOwnerId ? "" : "disabled"}>Sell to leader</button>
+        <button type="button" data-action="start" ${canStart ? "" : "disabled"}>${canStart ? "Start auction" : state.room.status === "completed" ? "Auction completed" : state.room.status === "paused" ? "Auction paused" : "Auction already running"}</button>
         <button type="button" data-action="unsold" ${nomination ? "" : "disabled"} class="ghost">Mark unsold</button>
         <button type="button" data-action="undo" class="ghost">Undo</button>
         <button type="button" data-action="pause" class="ghost">${state.room.status === "paused" ? "Resume" : "Pause"}</button>
@@ -490,19 +497,18 @@ function adminStageControls(stagePlayer, nomination) {
 function ownerBidPanel(nomination) {
   const member = state.auth.member;
   if (!nomination) {
-    return `<section class="bid-panel muted-panel"><p>No active bidding yet. The admin needs to nominate and open a player.</p></section>`;
+    return `<section class="bid-panel muted-panel"><p>No active bidding yet. The admin needs to start the auction.</p></section>`;
   }
 
   if (state.auth.isAdmin) {
     return `
       <section class="bid-panel">
-        <form id="adminBidForm" class="inline-toolbar">
-          <select id="adminBidOwner">
-            ${state.room.owners.map((owner) => `<option value="${owner.id}">${escapeHtml(owner.name)}</option>`).join("")}
-          </select>
-          <input id="adminBidAmount" type="number" step="0.05" min="0" placeholder="Bid in cr" />
-          <button type="submit">Place admin bid</button>
-        </form>
+        <div class="panel-head compact">
+          <div>
+            <h2>Turn Flow</h2>
+            <p>Bidding is turn-based. Owners bid only when it is their turn.</p>
+          </div>
+        </div>
       </section>
     `;
   }
@@ -512,6 +518,7 @@ function ownerBidPanel(nomination) {
     const minBidLakh = nomination.currentBidLakh === null
       ? nomination.startingBidLakh
       : nomination.currentBidLakh + nomination.bidStepLakh;
+    const isCurrentTurn = nomination.currentTurnOwnerId === member.ownerId;
     return `
       <section class="bid-panel">
         <div class="panel-head compact">
@@ -520,10 +527,19 @@ function ownerBidPanel(nomination) {
             <p>${owner ? `${escapeHtml(owner.name)} · ${formatAmount(owner.purseRemainingLakh)} remaining` : "Owner session not claimed."}</p>
           </div>
         </div>
-        <form id="ownerBidForm" class="inline-toolbar">
-          <input id="ownerBidAmount" type="number" step="0.05" min="0" placeholder="Minimum ${formatAmount(minBidLakh)}" />
-          <button type="submit">Place bid</button>
-        </form>
+        ${isCurrentTurn
+          ? `
+            <form id="ownerBidForm" class="inline-toolbar">
+              <input id="ownerBidAmount" type="number" step="0.05" min="0" placeholder="Minimum ${formatAmount(minBidLakh)}" />
+              <button type="submit">Place bid</button>
+              <button type="button" id="ownerSkipBtn" class="ghost">Skip turn</button>
+            </form>
+          `
+          : `
+            <div class="muted-panel">
+              <p>${turnOwnerText(nomination)}</p>
+            </div>
+          `}
       </section>
     `;
   }
@@ -568,7 +584,7 @@ function labelStatus(status) {
     sold: "Sold",
     unsold: "Unsold",
     nominated: "Nominated",
-    open: "Bidding Open",
+    open: "Turn Active",
     "last-call": "Last Call",
     all: "All",
   };
@@ -647,14 +663,8 @@ function bindRoomEvents() {
 
   document.querySelectorAll("[data-action]").forEach((button) => {
     button.addEventListener("click", async () => {
-      const selected = selectedPlayer();
       const type = button.dataset.action;
-      if (type === "nominate" && selected) {
-        await action("nominate-player", { playerId: selected.id, startingBidLakh: selected.baseCostLakh });
-      }
-      if (type === "open") await action("open-bidding");
-      if (type === "last-call") await action("set-last-call");
-      if (type === "close") await action("close-bidding");
+      if (type === "start") await action("start-auction");
       if (type === "unsold") await action("mark-unsold");
       if (type === "undo") await action("undo-last-action");
       if (type === "pause") await action(state.room.status === "paused" ? "resume-auction" : "pause-auction");
@@ -662,19 +672,14 @@ function bindRoomEvents() {
     });
   });
 
-  document.getElementById("adminBidForm")?.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const bidCr = Number(document.getElementById("adminBidAmount").value);
-    await action("place-bid", {
-      ownerId: document.getElementById("adminBidOwner").value,
-      amountLakh: Math.round(bidCr * 100),
-    });
-  });
-
   document.getElementById("ownerBidForm")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const bidCr = Number(document.getElementById("ownerBidAmount").value);
     await action("place-bid", { amountLakh: Math.round(bidCr * 100) });
+  });
+
+  document.getElementById("ownerSkipBtn")?.addEventListener("click", async () => {
+    await action("skip-turn");
   });
 }
 

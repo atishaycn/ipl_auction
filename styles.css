@@ -271,7 +271,7 @@ a {
 }
 
 .stage-metrics {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
   margin-top: 2rem;
   padding-top: 1rem;
   border-top: 1px solid var(--line);
@@ -385,6 +385,14 @@ a {
 }
 
 .owner-row.is-leading strong {
+  color: var(--accent-strong);
+}
+
+.owner-row.is-turn {
+  border-bottom-color: rgba(216, 162, 74, 0.5);
+}
+
+.owner-row.is-turn strong {
   color: var(--accent-strong);
 }
 
@@ -506,7 +514,7 @@ a {
 
 .public-matrix {
   margin-top: 2rem;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
 }
 
 .public-grid {
