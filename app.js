@@ -19,10 +19,16 @@ const state = {
   },
 };
 
-let eventSource = null;
+const ROOM_POLL_INTERVAL_MS = 2500;
+const ROOM_POLL_RETRY_MS = 5000;
+let roomPollTimer = null;
+let roomPollInFlight = false;
 
 render();
 if (route.roomId) loadRoom().catch((error) => presentError(error.message || "Failed to load room."));
+window.addEventListener("beforeunload", () => {
+  if (roomPollTimer) clearTimeout(roomPollTimer);
+});
 
 function parseRoute() {
   const parts = location.pathname.split("/").filter(Boolean);
@@ -75,32 +81,50 @@ async function withErrorPopup(task) {
   }
 }
 
-async function loadRoom() {
-  const params = new URLSearchParams();
-  if (state.auth.member?.memberToken) params.set("memberToken", state.auth.member.memberToken);
-  if (adminKey()) params.set("adminKey", adminKey());
-  const payload = await fetchJson(`/api/rooms/${state.route.roomId}/state?${params.toString()}`);
-  state.room = payload.room;
-  state.auth = payload.auth;
-  if (!state.ui.selectedPlayerId) {
-    state.ui.selectedPlayerId = state.room.currentNomination?.playerId || firstAvailablePlayerId();
+function stopRoomPolling() {
+  if (roomPollTimer) {
+    clearTimeout(roomPollTimer);
+    roomPollTimer = null;
   }
-  render();
-  connectEvents();
 }
 
-function connectEvents() {
-  if (eventSource || !state.route.roomId) return;
-  eventSource = new EventSource(`/api/rooms/${state.route.roomId}/events`);
-  eventSource.onmessage = (event) => {
-    const payload = JSON.parse(event.data);
-    if (payload.type !== "room:update") return;
+function scheduleRoomPolling(delay = ROOM_POLL_INTERVAL_MS) {
+  stopRoomPolling();
+  if (!state.route.roomId) return;
+  roomPollTimer = setTimeout(() => {
+    refreshRoom({ fatal: false });
+  }, delay);
+}
+
+async function refreshRoom({ fatal = false } = {}) {
+  if (!state.route.roomId || roomPollInFlight) return;
+  roomPollInFlight = true;
+  let nextDelay = fatal ? null : ROOM_POLL_INTERVAL_MS;
+
+  try {
+    const params = new URLSearchParams();
+    if (state.auth.member?.memberToken) params.set("memberToken", state.auth.member.memberToken);
+    if (adminKey()) params.set("adminKey", adminKey());
+    const payload = await fetchJson(`/api/rooms/${state.route.roomId}/state?${params.toString()}`);
     state.room = payload.room;
+    state.auth = payload.auth;
     if (!state.ui.selectedPlayerId || !state.room.players.some((player) => player.id === state.ui.selectedPlayerId)) {
       state.ui.selectedPlayerId = state.room.currentNomination?.playerId || firstAvailablePlayerId();
     }
     render();
-  };
+  } catch (error) {
+    if (fatal) throw error;
+    nextDelay = ROOM_POLL_RETRY_MS;
+    console.warn(error);
+  } finally {
+    roomPollInFlight = false;
+    if (nextDelay !== null) scheduleRoomPolling(nextDelay);
+  }
+}
+
+async function loadRoom() {
+  await refreshRoom({ fatal: true });
+  scheduleRoomPolling();
 }
 
 function adminKey() {
@@ -119,6 +143,7 @@ async function action(type, detail = {}) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ type, ...detail, ...currentActorPayload() }),
   });
+  refreshRoom({ fatal: false });
   return payload;
 }
 
